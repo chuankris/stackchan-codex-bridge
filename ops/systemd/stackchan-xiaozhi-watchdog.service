@@ -1,0 +1,7 @@
+[Unit]
+Description=StackChan Xiaozhi Watchdog
+After=stackchan-cloud-news.service stackchan-xiaozhi-client.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/stackchan-codex-bridge/ops/scripts/xiaozhi-watchdog.sh

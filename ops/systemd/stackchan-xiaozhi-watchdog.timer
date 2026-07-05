@@ -1,0 +1,11 @@
+[Unit]
+Description=Run StackChan Xiaozhi Watchdog
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=stackchan-xiaozhi-watchdog.service
+
+[Install]
+WantedBy=timers.target

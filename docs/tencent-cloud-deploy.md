@@ -61,11 +61,15 @@ Create `/opt/stackchan-codex-bridge/xiaozhi.config.json` on the server. It shoul
 Install systemd services:
 
 ```bash
+chmod +x /opt/stackchan-codex-bridge/ops/scripts/xiaozhi-watchdog.sh
 sudo cp /opt/stackchan-codex-bridge/ops/systemd/stackchan-cloud-news.service /etc/systemd/system/
 sudo cp /opt/stackchan-codex-bridge/ops/systemd/stackchan-xiaozhi-client.service /etc/systemd/system/
+sudo cp /opt/stackchan-codex-bridge/ops/systemd/stackchan-xiaozhi-watchdog.service /etc/systemd/system/
+sudo cp /opt/stackchan-codex-bridge/ops/systemd/stackchan-xiaozhi-watchdog.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now stackchan-cloud-news
 sudo systemctl enable --now stackchan-xiaozhi-client
+sudo systemctl enable --now stackchan-xiaozhi-watchdog.timer
 ```
 
 Check status:
@@ -75,8 +79,10 @@ curl -s http://127.0.0.1:8788/healthz
 curl -s 'http://127.0.0.1:8788/briefing?market=global&maxItems=2'
 systemctl status stackchan-cloud-news --no-pager
 systemctl status stackchan-xiaozhi-client --no-pager
+systemctl status stackchan-xiaozhi-watchdog.timer --no-pager
 journalctl -u stackchan-cloud-news -n 80 --no-pager
 journalctl -u stackchan-xiaozhi-client -n 80 --no-pager
+journalctl -u stackchan-xiaozhi-watchdog -n 80 --no-pager
 ```
 
 ## Current SSH Issue
@@ -123,6 +129,7 @@ As of 2026-07-05:
 
 - `stackchan-cloud-news.service` is installed, enabled, and active.
 - `stackchan-xiaozhi-client.service` is installed, enabled, and active.
+- `stackchan-xiaozhi-watchdog.timer` checks the Xiaozhi client once per minute and restarts it when the WebSocket closes with code `1006`.
 - The cloud news MCP endpoint is local to the server: `http://127.0.0.1:8788/mcp`.
 - The Xiaozhi Web UI uses port `10099` because port `9999` is already used by the piAgent service on the same server.
 - The cloud Xiaozhi client exposes only:
