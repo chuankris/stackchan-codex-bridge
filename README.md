@@ -5,6 +5,7 @@ Local MCP bridge for letting StackChan / Xiaozhi start and monitor Codex tasks o
 ## What It Exposes
 
 - `codex_start_task`: start a Codex task and return immediately.
+- `codex_list_projects`: list the project allowlist that the robot can use.
 - `codex_get_status`: read current status and recent events.
 - `codex_get_last_message`: read the latest captured Codex message.
 - `codex_interrupt`: stop the active Codex process.
@@ -12,6 +13,7 @@ Local MCP bridge for letting StackChan / Xiaozhi start and monitor Codex tasks o
 The bridge also exposes HTTP endpoints for debugging:
 
 - `GET /healthz`
+- `GET /projects`
 - `GET /status`
 - `POST /tasks`
 - `POST /interrupt`
@@ -41,13 +43,19 @@ Start a read-only Codex task:
 ```bash
 curl -s http://127.0.0.1:8787/tasks \
   -H 'content-type: application/json' \
-  -d '{"prompt":"Say hello in one sentence. Do not edit files.","sandbox":"read-only"}'
+  -d '{"projectKey":"stackchan-bridge","prompt":"Say hello in one sentence. Do not edit files.","sandbox":"read-only"}'
 ```
 
 Check progress:
 
 ```bash
 curl -s http://127.0.0.1:8787/status
+```
+
+List allowed projects:
+
+```bash
+curl -s http://127.0.0.1:8787/projects
 ```
 
 ## Connect To Xiaozhi
@@ -129,14 +137,44 @@ launchctl bootout "gui/$uid" ~/Library/LaunchAgents/com.stackchan.codex-bridge.p
 ## Safety Defaults
 
 - Default sandbox is `read-only`.
-- Default working directory is this project directory.
-- Default allowed root is this project directory.
-- To allow more directories, set `CODEX_BRIDGE_ALLOWED_ROOTS` as a colon-separated list.
+- Default project allowlist comes from `codex-projects.example.json`.
+- Real project allowlists should live in `codex-projects.json`, which is ignored by git.
+- `codex_start_task` should use `projectKey` from `codex_list_projects`.
+- Direct `cwd` is still accepted as a compatibility fallback, but it must resolve inside the project allowlist.
 
-Example:
+Create your local allowlist:
 
 ```bash
-CODEX_BRIDGE_ALLOWED_ROOTS="$PWD:/path/to/another/project" npm start
+cp codex-projects.example.json codex-projects.json
+```
+
+Example allowlist:
+
+```json
+{
+  "projects": [
+    {
+      "key": "stackchan-bridge",
+      "name": "StackChan Codex Bridge",
+      "path": ".",
+      "description": "This MCP bridge project.",
+      "defaultSandbox": "read-only"
+    },
+    {
+      "key": "my-app",
+      "name": "My App",
+      "path": "/path/to/my-app",
+      "description": "Application repo that StackChan may ask Codex to inspect.",
+      "defaultSandbox": "read-only"
+    }
+  ]
+}
+```
+
+You can override the allowlist path:
+
+```bash
+CODEX_BRIDGE_PROJECTS_FILE=/path/to/codex-projects.json npm start
 ```
 
 Use `workspace-write` only when you want Codex to edit files. Avoid `danger-full-access` unless the Mac is otherwise isolated.

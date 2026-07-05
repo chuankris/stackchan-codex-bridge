@@ -1,0 +1,11 @@
+{
+  "projects": [
+    {
+      "key": "stackchan-bridge",
+      "name": "StackChan Codex Bridge",
+      "path": ".",
+      "description": "This MCP bridge project. Safe default for smoke tests and bridge development.",
+      "defaultSandbox": "read-only"
+    }
+  ]
+}

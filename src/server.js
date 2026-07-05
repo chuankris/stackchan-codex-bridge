@@ -1,7 +1,8 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
-import { resolve, relative } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -10,18 +11,27 @@ import { z } from "zod";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "127.0.0.1";
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(__dirname, "..");
 const DEFAULT_CWD = resolve(process.env.CODEX_BRIDGE_DEFAULT_CWD || process.cwd());
 const CODEX_BIN = process.env.CODEX_BIN || "/Applications/Codex.app/Contents/Resources/codex";
-const ALLOWED_ROOTS = (process.env.CODEX_BRIDGE_ALLOWED_ROOTS || DEFAULT_CWD)
+const PROJECTS_FILE = resolve(process.env.CODEX_BRIDGE_PROJECTS_FILE || "codex-projects.json");
+const FALLBACK_PROJECTS_FILE = resolve(REPO_ROOT, "codex-projects.example.json");
+const legacyAllowedRoots = (process.env.CODEX_BRIDGE_ALLOWED_ROOTS || "")
   .split(":")
-  .map((item) => resolve(item))
-  .filter(Boolean);
+  .map((item) => item.trim())
+  .filter(Boolean)
+  .map((item) => resolve(item));
+const PROJECTS = loadProjects();
+const ALLOWED_ROOTS = uniqueResolvedPaths([...PROJECTS.map((project) => project.path), ...legacyAllowedRoots]);
 
 const state = {
   status: "idle",
   startedAt: null,
   completedAt: null,
   cwd: null,
+  projectKey: null,
+  projectName: null,
   sandbox: null,
   promptPreview: null,
   threadId: null,
@@ -56,6 +66,8 @@ function publicStatus() {
     startedAt: state.startedAt,
     completedAt: state.completedAt,
     cwd: state.cwd,
+    projectKey: state.projectKey,
+    projectName: state.projectName,
     sandbox: state.sandbox,
     promptPreview: state.promptPreview,
     threadId: state.threadId,
@@ -76,23 +88,100 @@ function isInsideAllowedRoot(candidate) {
   });
 }
 
-function resolveCwd(cwd) {
-  const resolved = resolve(cwd || DEFAULT_CWD);
-  if (!isInsideAllowedRoot(resolved)) {
-    throw new Error(`cwd is outside allowed roots: ${resolved}`);
+function uniqueResolvedPaths(paths) {
+  return [...new Set(paths.map((item) => resolve(item)))];
+}
+
+function readJsonConfig(path) {
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+function normalizeProject(raw, index) {
+  if (!raw || typeof raw !== "object") {
+    throw new Error(`project entry at index ${index} must be an object`);
   }
-  return resolved;
+  const key = String(raw.key || "").trim();
+  if (!key || !/^[a-zA-Z0-9._-]+$/.test(key)) {
+    throw new Error(`project entry at index ${index} has invalid key`);
+  }
+  const projectPath = resolve(String(raw.path || ""));
+  return {
+    key,
+    name: String(raw.name || key),
+    path: projectPath,
+    description: String(raw.description || ""),
+    defaultSandbox: raw.defaultSandbox || "read-only",
+  };
+}
+
+function loadProjects() {
+  const configPath = existsSync(PROJECTS_FILE) ? PROJECTS_FILE : FALLBACK_PROJECTS_FILE;
+  const data = readJsonConfig(configPath);
+  const rawProjects = Array.isArray(data) ? data : data.projects;
+  if (!Array.isArray(rawProjects)) {
+    throw new Error(`projects config must be an array or an object with a projects array: ${configPath}`);
+  }
+  const projects = rawProjects.map(normalizeProject);
+  const keys = new Set();
+  for (const project of projects) {
+    if (keys.has(project.key)) {
+      throw new Error(`duplicate project key: ${project.key}`);
+    }
+    keys.add(project.key);
+  }
+  if (!projects.length) {
+    return [
+      {
+        key: "default",
+        name: "Default workspace",
+        path: DEFAULT_CWD,
+        description: "Fallback default workspace.",
+        defaultSandbox: "read-only",
+      },
+    ];
+  }
+  return projects;
+}
+
+function publicProjects() {
+  return PROJECTS.map((project) => ({
+    key: project.key,
+    name: project.name,
+    path: project.path,
+    description: project.description,
+    defaultSandbox: project.defaultSandbox,
+  }));
+}
+
+function findProject(projectKey) {
+  if (!projectKey) return null;
+  const project = PROJECTS.find((item) => item.key === projectKey);
+  if (!project) {
+    throw new Error(`unknown projectKey: ${projectKey}`);
+  }
+  return project;
+}
+
+function resolveCwd({ cwd, projectKey }) {
+  const project = findProject(projectKey);
+  const resolved = project ? project.path : resolve(cwd || DEFAULT_CWD);
+  if (!isInsideAllowedRoot(resolved)) {
+    throw new Error(`cwd is outside the project allowlist: ${resolved}`);
+  }
+  return { cwd: resolved, project };
 }
 
 function codexCommand() {
   return existsSync(CODEX_BIN) ? CODEX_BIN : "codex";
 }
 
-function resetRun({ prompt, cwd, sandbox }) {
+function resetRun({ prompt, cwd, project, sandbox }) {
   state.status = "running";
   state.startedAt = new Date().toISOString();
   state.completedAt = null;
   state.cwd = cwd;
+  state.projectKey = project?.key || null;
+  state.projectName = project?.name || null;
   state.sandbox = sandbox;
   state.promptPreview = prompt.length > 160 ? `${prompt.slice(0, 157)}...` : prompt;
   state.threadId = null;
@@ -168,23 +257,23 @@ function consumeJsonLines(chunk) {
   }
 }
 
-function startCodexTask({ prompt, cwd, sandbox, skipGitRepoCheck }) {
+function startCodexTask({ prompt, cwd, projectKey, sandbox, skipGitRepoCheck }) {
   if (activeProcess) {
     throw new Error("Codex is already running. Use codex_get_status or codex_interrupt first.");
   }
 
-  const resolvedCwd = resolveCwd(cwd);
-  const selectedSandbox = sandbox || "read-only";
-  resetRun({ prompt, cwd: resolvedCwd, sandbox: selectedSandbox });
+  const resolved = resolveCwd({ cwd, projectKey });
+  const selectedSandbox = sandbox || resolved.project?.defaultSandbox || "read-only";
+  resetRun({ prompt, cwd: resolved.cwd, project: resolved.project, sandbox: selectedSandbox });
 
-  const args = ["exec", "--json", "--cd", resolvedCwd, "--sandbox", selectedSandbox];
+  const args = ["exec", "--json", "--cd", resolved.cwd, "--sandbox", selectedSandbox];
   if (skipGitRepoCheck !== false) {
     args.push("--skip-git-repo-check");
   }
   args.push(prompt);
 
   activeProcess = spawn(codexCommand(), args, {
-    cwd: resolvedCwd,
+    cwd: resolved.cwd,
     stdio: ["ignore", "pipe", "pipe"],
     env: process.env,
   });
@@ -252,19 +341,29 @@ function createMcpServer() {
   });
 
   server.registerTool(
+    "codex_list_projects",
+    {
+      title: "List allowed Codex projects",
+      description: "List the project allowlist that StackChan can ask Codex to work on.",
+    },
+    async () => jsonContent({ projects: publicProjects() }),
+  );
+
+  server.registerTool(
     "codex_start_task",
     {
       title: "Start a Codex task",
-      description: "Start a Codex task on this Mac and return immediately with monitorable status.",
+      description: "Start a Codex task in an allowed project and return immediately with monitorable status.",
       inputSchema: {
         prompt: z.string().min(1).describe("The task to give to Codex."),
-        cwd: z.string().optional().describe("Working directory. Must be under an allowed root."),
+        projectKey: z.string().optional().describe("Preferred. A key from codex_list_projects."),
+        cwd: z.string().optional().describe("Compatibility fallback. Must resolve inside the project allowlist."),
         sandbox: z.enum(["read-only", "workspace-write", "danger-full-access"]).optional(),
         skipGitRepoCheck: z.boolean().optional(),
       },
     },
-    async ({ prompt, cwd, sandbox, skipGitRepoCheck }) => {
-      return jsonContent(startCodexTask({ prompt, cwd, sandbox, skipGitRepoCheck }));
+    async ({ prompt, cwd, projectKey, sandbox, skipGitRepoCheck }) => {
+      return jsonContent(startCodexTask({ prompt, cwd, projectKey, sandbox, skipGitRepoCheck }));
     },
   );
 
@@ -380,6 +479,11 @@ const httpServer = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/projects" && req.method === "GET") {
+      sendJson(res, 200, { projects: publicProjects() });
+      return;
+    }
+
     if (url.pathname === "/tasks" && req.method === "POST") {
       const body = await readJsonBody(req);
       sendJson(res, 202, startCodexTask(body));
@@ -408,5 +512,5 @@ const httpServer = createServer(async (req, res) => {
 httpServer.listen(PORT, HOST, () => {
   console.log(`StackChan Codex bridge listening on http://${HOST}:${PORT}`);
   console.log(`MCP endpoint: http://${HOST}:${PORT}/mcp`);
-  console.log(`Allowed roots: ${ALLOWED_ROOTS.join(", ")}`);
+  console.log(`Allowed projects: ${PROJECTS.map((project) => `${project.key}=${project.path}`).join(", ")}`);
 });
