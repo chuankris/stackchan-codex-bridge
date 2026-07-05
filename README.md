@@ -98,6 +98,60 @@ docker compose -f docker-compose.xiaozhi.example.yml up -d
 
 The Docker bridge reads `config/xiaozhi-bridge.example.json` and forwards tool calls to this local service.
 
+## Cloud News MCP
+
+For always-online robot features, run a separate cloud-safe MCP service that does not touch Codex or local project files.
+
+Tools:
+
+- `news_daily_briefing`: fetch public RSS sources and return a short Chinese spoken finance/news briefing.
+- `news_list_sources`: list configured public RSS sources.
+
+Start it locally:
+
+```bash
+npm run start:cloud-news
+```
+
+Default endpoints:
+
+```text
+http://0.0.0.0:8788/mcp
+http://0.0.0.0:8788/healthz
+http://0.0.0.0:8788/briefing
+```
+
+For Tencent Cloud, bind it to a stable port and place Nginx or a cloud load balancer with HTTPS in front:
+
+```bash
+HOST=0.0.0.0 PORT=8788 npm run start:cloud-news
+```
+
+Useful environment variables:
+
+```text
+PORT=8788
+HOST=0.0.0.0
+NEWS_FETCH_TIMEOUT_MS=8000
+NEWS_CACHE_TTL_MS=600000
+NEWS_MAX_ITEMS=6
+```
+
+Add the public HTTPS MCP URL to the Xiaozhi MCP config, for example:
+
+```json
+{
+  "mcpServers": {
+    "cloud-news": {
+      "type": "http",
+      "url": "https://your-domain.example.com/mcp"
+    }
+  }
+}
+```
+
+This cloud service is intended for stable read-only abilities such as news, weather, calendars, and reminders. Keep Mac-only abilities such as Codex control on the local bridge.
+
 ## Run As Mac LaunchAgents
 
 For a long-running Mac setup, install user LaunchAgents that run:
