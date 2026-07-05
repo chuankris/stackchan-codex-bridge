@@ -1,0 +1,17 @@
+{
+  "name": "stackchan-codex-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local MCP bridge that lets StackChan start and monitor Codex tasks on this Mac.",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "node --check src/server.js && python3 -m py_compile m5t_project_mcp.py"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "xiaozhi-client": "^2.3.0",
+    "zod": "^4.0.0"
+  }
+}

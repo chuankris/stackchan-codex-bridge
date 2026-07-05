@@ -1,0 +1,13 @@
+node_modules/
+.DS_Store
+*.log
+.env
+.codex-bridge.pid
+.xiaozhi-foreground.pid
+.xiaozhi-mcp-service.pid
+.xiaozhi.pid
+tool-calls.jsonl
+xiaozhi.cache.json
+xiaozhi.config.json
+xiaozhi.config.json5
+xiaozhi.config.jsonc

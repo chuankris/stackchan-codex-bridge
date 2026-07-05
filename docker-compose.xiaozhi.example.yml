@@ -1,0 +1,9 @@
+services:
+  xiaozhi-mcp-bridge:
+    image: angelinmylife/xiaozhi-mcp-bridge:latest
+    container_name: xiaozhi-mcp-bridge
+    restart: unless-stopped
+    volumes:
+      - ./config/xiaozhi-bridge.example.json:/app/config.json:ro
+    environment:
+      MCP_ENDPOINT: "wss://api.xiaozhi.me/mcp/?token=REPLACE_WITH_NEW_TOKEN"

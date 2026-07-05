@@ -1,0 +1,17 @@
+{
+  "mcpEndpoint": "wss://api.xiaozhi.me/mcp/?token=YOUR_TOKEN",
+  "mcpServers": {
+    "codex-on-mac": {
+      "type": "http",
+      "url": "http://127.0.0.1:8787/mcp"
+    }
+  },
+  "connection": {
+    "heartbeatInterval": 30000,
+    "heartbeatTimeout": 10000,
+    "reconnectInterval": 5000
+  },
+  "webUI": {
+    "port": 9999
+  }
+}
