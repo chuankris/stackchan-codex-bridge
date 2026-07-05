@@ -135,5 +135,7 @@ As of 2026-07-05:
 - The cloud Xiaozhi client exposes only:
   - `news_daily_briefing`
   - `news_list_sources`
+  - `stock_quote`
+  - `stock_daily_briefing`
 
 The Mac-side Xiaozhi LaunchAgent can be stopped while this cloud service is responsible for the robot's always-online news tools.

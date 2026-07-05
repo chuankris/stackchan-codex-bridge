@@ -11,6 +11,11 @@ const HOST = process.env.HOST || "0.0.0.0";
 const DEFAULT_TIMEOUT_MS = Number(process.env.NEWS_FETCH_TIMEOUT_MS || 8000);
 const DEFAULT_MAX_ITEMS = Number(process.env.NEWS_MAX_ITEMS || 6);
 const CACHE_TTL_MS = Number(process.env.NEWS_CACHE_TTL_MS || 10 * 60 * 1000);
+const STOCK_CACHE_TTL_MS = Number(process.env.STOCK_CACHE_TTL_MS || 60 * 1000);
+const DEFAULT_STOCK_SYMBOLS = (process.env.STOCK_DEFAULT_SYMBOLS || "AAPL,MSFT,NVDA,TSLA,0700.HK,600519.SS")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean);
 
 const NEWS_SOURCES = [
   {
@@ -52,6 +57,7 @@ const parser = new XMLParser({
 });
 
 const cache = new Map();
+const stockCache = new Map();
 const transports = {};
 
 function jsonContent(payload) {
@@ -124,7 +130,7 @@ async function fetchWithTimeout(url, timeoutMs) {
       signal: controller.signal,
       headers: {
         "user-agent": "stackchan-cloud-news-mcp/0.1 (+https://github.com/chuankris/stackchan-codex-bridge)",
-        accept: "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+        accept: "application/rss+xml, application/xml, text/xml, application/json;q=0.9, */*;q=0.8",
       },
     });
     if (!response.ok) {
@@ -134,6 +140,10 @@ async function fetchWithTimeout(url, timeoutMs) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs) {
+  return JSON.parse(await fetchWithTimeout(url, timeoutMs));
 }
 
 async function fetchSource(source) {
@@ -228,6 +238,170 @@ async function getDailyBriefing({ market = "global", maxItems = DEFAULT_MAX_ITEM
   };
 }
 
+function normalizeStockSymbol(symbol, market = "auto") {
+  const raw = String(symbol || "").trim().toUpperCase();
+  if (!raw) throw new Error("symbol is required");
+  if (raw.includes(".")) return raw;
+
+  if (market === "hk") {
+    return `${raw.padStart(4, "0")}.HK`;
+  }
+
+  if (market === "cn" || (/^\d{6}$/.test(raw) && market === "auto")) {
+    if (raw.startsWith("6") || raw.startsWith("9")) return `${raw}.SS`;
+    return `${raw}.SZ`;
+  }
+
+  return raw;
+}
+
+function formatPercent(value) {
+  if (!Number.isFinite(value)) return null;
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(2)}%`;
+}
+
+function formatPrice(value, currency) {
+  if (!Number.isFinite(value)) return "暂无价格";
+  return `${value.toFixed(value >= 100 ? 2 : 3)} ${currency || ""}`.trim();
+}
+
+function latestNumber(values = []) {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    if (Number.isFinite(values[index])) return values[index];
+  }
+  return null;
+}
+
+function toIsoTime(timestamp) {
+  return Number.isFinite(timestamp) ? new Date(timestamp * 1000).toISOString() : null;
+}
+
+function buildStockQuoteFromChart(symbol, chartResult) {
+  const result = chartResult?.chart?.result?.[0];
+  const error = chartResult?.chart?.error;
+  if (!result) {
+    throw new Error(error?.description || `No chart data for ${symbol}`);
+  }
+
+  const meta = result.meta || {};
+  const quote = result.indicators?.quote?.[0] || {};
+  const timestamps = result.timestamp || [];
+  const closes = (quote.close || []).filter((value) => Number.isFinite(value));
+  const close = closes.at(-1) ?? null;
+  const regularMarketPrice = Number.isFinite(meta.regularMarketPrice) ? meta.regularMarketPrice : close;
+  const previousClose = closes.length >= 2
+    ? closes.at(-2)
+    : Number.isFinite(meta.previousClose)
+      ? meta.previousClose
+      : Number.isFinite(meta.chartPreviousClose)
+        ? meta.chartPreviousClose
+        : null;
+  const change = Number.isFinite(regularMarketPrice) && Number.isFinite(previousClose)
+    ? regularMarketPrice - previousClose
+    : null;
+  const changePercent = Number.isFinite(change) && previousClose
+    ? (change / previousClose) * 100
+    : null;
+
+  return {
+    symbol: meta.symbol || symbol,
+    shortName: meta.shortName || meta.longName || meta.symbol || symbol,
+    exchange: meta.exchangeName || meta.fullExchangeName || null,
+    currency: meta.currency || null,
+    regularMarketPrice,
+    previousClose,
+    change,
+    changePercent,
+    changePercentText: formatPercent(changePercent),
+    dayHigh: latestNumber(quote.high),
+    dayLow: latestNumber(quote.low),
+    volume: latestNumber(quote.volume),
+    marketTime: toIsoTime(meta.regularMarketTime || timestamps.at(-1)),
+    source: "Yahoo Finance chart",
+  };
+}
+
+async function getStockQuote({ symbol, market = "auto" }) {
+  const normalizedSymbol = normalizeStockSymbol(symbol, market);
+  const cacheKey = `stock:${normalizedSymbol}`;
+  const now = Date.now();
+  const cached = stockCache.get(cacheKey);
+  if (cached && now - cached.fetchedAt < STOCK_CACHE_TTL_MS) {
+    return cached.payload;
+  }
+
+  const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(normalizedSymbol)}?range=5d&interval=1d`;
+  const chart = await fetchJsonWithTimeout(chartUrl, DEFAULT_TIMEOUT_MS);
+  const quote = buildStockQuoteFromChart(normalizedSymbol, chart);
+  const spokenSummary = `${quote.shortName}，当前价格${formatPrice(quote.regularMarketPrice, quote.currency)}，较前收盘${quote.changePercentText || "暂无涨跌幅数据"}。公开行情仅供参考，不构成投资建议。`;
+  const payload = {
+    asOf: new Date().toISOString(),
+    inputSymbol: symbol,
+    market,
+    normalizedSymbol,
+    quote,
+    spokenSummary,
+    disclaimer: "Market data summary only. Not investment advice.",
+  };
+  stockCache.set(cacheKey, { fetchedAt: now, payload });
+  return payload;
+}
+
+async function getStockNews({ symbol, maxItems = 3 }) {
+  const search = encodeURIComponent(`${symbol} 股票 财报 OR 股价 OR news`);
+  const source = {
+    key: `stock-news-${symbol}`,
+    name: "Google News Search",
+    url: `https://news.google.com/rss/search?q=${search}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans`,
+    region: "global",
+  };
+
+  try {
+    const xml = await fetchWithTimeout(source.url, DEFAULT_TIMEOUT_MS);
+    return sortByPublishedAt(extractItems(source, xml)).slice(0, Math.max(1, Math.min(Number(maxItems) || 3, 6)));
+  } catch (error) {
+    return [{ title: "相关新闻暂时获取失败", summary: error.message, source: source.name, url: "", publishedAt: null }];
+  }
+}
+
+async function getStockDailyBriefing({ symbols = DEFAULT_STOCK_SYMBOLS, market = "auto", maxItems = 5 } = {}) {
+  const safeSymbols = (Array.isArray(symbols) && symbols.length ? symbols : DEFAULT_STOCK_SYMBOLS)
+    .map((item) => String(item).trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  const quotes = await Promise.allSettled(safeSymbols.map((symbol) => getStockQuote({ symbol, market })));
+  const quoteItems = quotes.map((result, index) => {
+    if (result.status === "fulfilled") return result.value.quote;
+    return { symbol: safeSymbols[index], error: result.reason?.message || String(result.reason) };
+  });
+  const successfulQuotes = quoteItems.filter((item) => !item.error);
+  const newsItems = safeSymbols[0] ? await getStockNews({ symbol: safeSymbols[0], maxItems: 2 }) : [];
+  const lines = ["股票市场快速播报。"];
+
+  for (const quote of successfulQuotes.slice(0, Math.max(1, Math.min(Number(maxItems) || 5, 8)))) {
+    lines.push(`${quote.shortName}，${formatPrice(quote.regularMarketPrice, quote.currency)}，涨跌幅${quote.changePercentText || "暂无"}。`);
+  }
+  if (newsItems.length) {
+    lines.push(`相关新闻：${newsItems[0].title}。`);
+  }
+  const failedCount = quoteItems.filter((item) => item.error).length;
+  if (failedCount) {
+    lines.push(`另外有${failedCount}只股票暂时没有取到行情。`);
+  }
+  lines.push("以上是公开行情和新闻摘要，不构成投资建议。");
+
+  return {
+    asOf: new Date().toISOString(),
+    symbols: safeSymbols,
+    market,
+    quotes: quoteItems,
+    newsItems,
+    spokenBriefing: lines.join(""),
+    disclaimer: "Market data and public news summary only. Not investment advice.",
+  };
+}
+
 function createMcpServer() {
   const server = new McpServer({
     name: "stackchan-cloud-news",
@@ -255,6 +429,33 @@ function createMcpServer() {
       description: "List public RSS sources used by the cloud news MCP service.",
     },
     async () => jsonContent({ sources: NEWS_SOURCES }),
+  );
+
+  server.registerTool(
+    "stock_quote",
+    {
+      title: "Stock quote",
+      description: "Fetch a read-only public stock quote summary. Does not trade or provide buy/sell advice.",
+      inputSchema: {
+        symbol: z.string().min(1).describe("Stock symbol, e.g. AAPL, 0700.HK, 600519.SS, or 600519 with market=cn."),
+        market: z.enum(["auto", "us", "hk", "cn"]).optional().describe("Optional symbol normalization market."),
+      },
+    },
+    async ({ symbol, market }) => jsonContent(await getStockQuote({ symbol, market })),
+  );
+
+  server.registerTool(
+    "stock_daily_briefing",
+    {
+      title: "Stock daily briefing",
+      description: "Fetch read-only public stock quotes and related news, then return a short Chinese spoken briefing.",
+      inputSchema: {
+        symbols: z.array(z.string()).optional().describe("Symbols to summarize. Defaults to a small global watchlist."),
+        market: z.enum(["auto", "us", "hk", "cn"]).optional().describe("Optional symbol normalization market."),
+        maxItems: z.number().int().min(1).max(8).optional().describe("Maximum number of quote items to speak."),
+      },
+    },
+    async ({ symbols, market, maxItems }) => jsonContent(await getStockDailyBriefing({ symbols, market, maxItems })),
   );
 
   return server;
@@ -348,6 +549,27 @@ const httpServer = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/stock" && req.method === "GET") {
+      sendJson(res, 200, await getStockQuote({
+        symbol: url.searchParams.get("symbol") || "AAPL",
+        market: url.searchParams.get("market") || "auto",
+      }));
+      return;
+    }
+
+    if (url.pathname === "/stock-briefing" && req.method === "GET") {
+      const symbols = (url.searchParams.get("symbols") || "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+      sendJson(res, 200, await getStockDailyBriefing({
+        symbols,
+        market: url.searchParams.get("market") || "auto",
+        maxItems: url.searchParams.get("maxItems") || 5,
+      }));
+      return;
+    }
+
     if (url.pathname === "/mcp") {
       await handleMcpRequest(req, res);
       return;
@@ -355,7 +577,7 @@ const httpServer = createServer(async (req, res) => {
 
     sendJson(res, 404, {
       error: "not_found",
-      endpoints: ["GET /healthz", "GET /sources", "GET /briefing", "POST/GET /mcp"],
+      endpoints: ["GET /healthz", "GET /sources", "GET /briefing", "GET /stock", "GET /stock-briefing", "POST/GET /mcp"],
     });
   } catch (error) {
     sendJson(res, 500, { error: error.message });
