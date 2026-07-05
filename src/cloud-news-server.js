@@ -17,6 +17,19 @@ const DEFAULT_STOCK_SYMBOLS = (process.env.STOCK_DEFAULT_SYMBOLS || "AAPL,MSFT,N
   .map((item) => item.trim())
   .filter(Boolean);
 
+const STOCK_ALIASES = new Map([
+  ["中国铝业", "601600.SS"],
+  ["中铝", "601600.SS"],
+  ["中国铝业a股", "601600.SS"],
+  ["中国铝业h股", "2600.HK"],
+  ["chalco", "2600.HK"],
+  ["中国宏桥", "1378.HK"],
+  ["中国宏桥集团", "1378.HK"],
+  ["宏桥控股", "1378.HK"],
+  ["虹桥控股", "1378.HK"],
+  ["hongqiao", "1378.HK"],
+]);
+
 const NEWS_SOURCES = [
   {
     key: "google-business",
@@ -239,7 +252,9 @@ async function getDailyBriefing({ market = "global", maxItems = DEFAULT_MAX_ITEM
 }
 
 function normalizeStockSymbol(symbol, market = "auto") {
-  const raw = String(symbol || "").trim().toUpperCase();
+  const original = String(symbol || "").trim();
+  const alias = STOCK_ALIASES.get(original.toLowerCase()) || STOCK_ALIASES.get(original);
+  const raw = (alias || original).toUpperCase();
   if (!raw) throw new Error("symbol is required");
   if (raw.includes(".")) return raw;
 
@@ -287,10 +302,20 @@ function isChinaStockSymbol(symbol) {
   return /^\d{6}\.(SS|SZ)$/.test(symbol);
 }
 
+function isHongKongStockSymbol(symbol) {
+  return /^\d{4,5}\.HK$/.test(symbol);
+}
+
 function toTencentChinaSymbol(normalizedSymbol) {
   const match = /^(\d{6})\.(SS|SZ)$/.exec(normalizedSymbol);
   if (!match) throw new Error(`not a China stock symbol: ${normalizedSymbol}`);
   return `${match[2] === "SS" ? "sh" : "sz"}${match[1]}`;
+}
+
+function toTencentHongKongSymbol(normalizedSymbol) {
+  const match = /^(\d{4,5})\.HK$/.exec(normalizedSymbol);
+  if (!match) throw new Error(`not a Hong Kong stock symbol: ${normalizedSymbol}`);
+  return `hk${match[1].padStart(5, "0")}`;
 }
 
 function toIsoTime(timestamp) {
@@ -404,7 +429,7 @@ function parseTencentNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function buildStockQuoteFromTencent(normalizedSymbol, text) {
+function buildStockQuoteFromTencent(normalizedSymbol, text, { exchange, currency, source }) {
   const match = /=\"(.+)\";?\s*$/.exec(text.trim());
   if (!match) throw new Error(`No Tencent quote data for ${normalizedSymbol}`);
   const fields = match[1].split("~");
@@ -418,8 +443,8 @@ function buildStockQuoteFromTencent(normalizedSymbol, text) {
   return {
     symbol: normalizedSymbol,
     shortName: fields[1] || normalizedSymbol,
-    exchange: normalizedSymbol.endsWith(".SS") ? "Shanghai" : "Shenzhen",
-    currency: "CNY",
+    exchange,
+    currency,
     regularMarketPrice: price,
     previousClose,
     change,
@@ -430,12 +455,13 @@ function buildStockQuoteFromTencent(normalizedSymbol, text) {
     volume: parseTencentNumber(fields[36]),
     amount: parseTencentNumber(fields[37]),
     marketTime: fields[30] || null,
-    source: "Tencent quote",
+    source,
   };
 }
 
-async function getTencentChinaStockQuote(normalizedSymbol) {
-  const tencentSymbol = toTencentChinaSymbol(normalizedSymbol);
+async function getTencentStockQuote(normalizedSymbol) {
+  const isChina = isChinaStockSymbol(normalizedSymbol);
+  const tencentSymbol = isChina ? toTencentChinaSymbol(normalizedSymbol) : toTencentHongKongSymbol(normalizedSymbol);
   const url = `https://qt.gtimg.cn/q=${encodeURIComponent(tencentSymbol)}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
@@ -454,7 +480,11 @@ async function getTencentChinaStockQuote(normalizedSymbol) {
   } finally {
     clearTimeout(timeout);
   }
-  return buildStockQuoteFromTencent(normalizedSymbol, text);
+  return buildStockQuoteFromTencent(normalizedSymbol, text, {
+    exchange: isChina ? (normalizedSymbol.endsWith(".SS") ? "Shanghai" : "Shenzhen") : "Hong Kong",
+    currency: isChina ? "CNY" : "HKD",
+    source: isChina ? "Tencent China quote" : "Tencent Hong Kong quote",
+  });
 }
 
 async function getStockQuote({ symbol, market = "auto" }) {
@@ -474,8 +504,8 @@ async function getStockQuote({ symbol, market = "auto" }) {
     quote = buildStockQuoteFromChart(normalizedSymbol, chart);
   } catch (error) {
     primaryError = error;
-    quote = isChinaStockSymbol(normalizedSymbol)
-      ? await getTencentChinaStockQuote(normalizedSymbol)
+    quote = isChinaStockSymbol(normalizedSymbol) || isHongKongStockSymbol(normalizedSymbol)
+      ? await getTencentStockQuote(normalizedSymbol)
       : await getNasdaqStockQuote(normalizedSymbol);
   }
   const spokenSummary = `${quote.shortName}，当前价格${formatPrice(quote.regularMarketPrice, quote.currency)}，较前收盘${quote.changePercentText || "暂无涨跌幅数据"}。公开行情仅供参考，不构成投资建议。`;
