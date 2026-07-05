@@ -5,6 +5,7 @@ Target server:
 - Public IP: `43.163.92.205`
 - SSH user: `ubuntu`
 - SSH port: `22`
+- Deployment path: `/opt/stackchan-codex-bridge`
 
 Do not commit the server password or Xiaozhi endpoint token.
 
@@ -52,7 +53,7 @@ Create `/opt/stackchan-codex-bridge/xiaozhi.config.json` on the server. It shoul
     "reconnectInterval": 5000
   },
   "webUI": {
-    "port": 9999
+    "port": 10099
   }
 }
 ```
@@ -80,7 +81,7 @@ journalctl -u stackchan-xiaozhi-client -n 80 --no-pager
 
 ## Current SSH Issue
 
-On 2026-07-05, local checks from the Mac showed:
+On 2026-07-05, local checks from the Mac initially showed:
 
 ```text
 nc -vz -w 10 43.163.92.205 22
@@ -91,6 +92,15 @@ Connection timed out during banner exchange
 ```
 
 This means TCP port 22 is reachable, but the SSH daemon did not return the SSH protocol banner before timeout. This happens before username/password authentication.
+
+Root cause in this environment: Clash Verge TUN/proxy was sending `43.163.92.205` through a proxy node. Adding a direct rule fixed SSH:
+
+```yaml
+prepend-rules:
+  - IP-CIDR,43.163.92.205/32,DIRECT,no-resolve
+```
+
+After reloading Clash/Mihomo, `ssh ubuntu@43.163.92.205 'echo ok'` succeeded.
 
 Check from Tencent Cloud console:
 
@@ -106,3 +116,17 @@ If needed:
 ```bash
 sudo systemctl restart ssh
 ```
+
+## Current Deployment State
+
+As of 2026-07-05:
+
+- `stackchan-cloud-news.service` is installed, enabled, and active.
+- `stackchan-xiaozhi-client.service` is installed, enabled, and active.
+- The cloud news MCP endpoint is local to the server: `http://127.0.0.1:8788/mcp`.
+- The Xiaozhi Web UI uses port `10099` because port `9999` is already used by the piAgent service on the same server.
+- The cloud Xiaozhi client exposes only:
+  - `news_daily_briefing`
+  - `news_list_sources`
+
+The Mac-side Xiaozhi LaunchAgent can be stopped while this cloud service is responsible for the robot's always-online news tools.
