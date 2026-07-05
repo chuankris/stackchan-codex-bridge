@@ -12,7 +12,7 @@ const DEFAULT_TIMEOUT_MS = Number(process.env.NEWS_FETCH_TIMEOUT_MS || 8000);
 const DEFAULT_MAX_ITEMS = Number(process.env.NEWS_MAX_ITEMS || 6);
 const CACHE_TTL_MS = Number(process.env.NEWS_CACHE_TTL_MS || 10 * 60 * 1000);
 const STOCK_CACHE_TTL_MS = Number(process.env.STOCK_CACHE_TTL_MS || 60 * 1000);
-const DEFAULT_STOCK_SYMBOLS = (process.env.STOCK_DEFAULT_SYMBOLS || "AAPL,MSFT,NVDA,TSLA,0700.HK,600519.SS")
+const DEFAULT_STOCK_SYMBOLS = (process.env.STOCK_DEFAULT_SYMBOLS || "AAPL,MSFT,NVDA,TSLA")
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
@@ -266,11 +266,21 @@ function formatPrice(value, currency) {
   return `${value.toFixed(value >= 100 ? 2 : 3)} ${currency || ""}`.trim();
 }
 
+function parseMarketNumber(value) {
+  const text = String(value || "").replace(/[,$%+]/g, "").trim();
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function latestNumber(values = []) {
   for (let index = values.length - 1; index >= 0; index -= 1) {
     if (Number.isFinite(values[index])) return values[index];
   }
   return null;
+}
+
+function isLikelyUsSymbol(symbol) {
+  return /^[A-Z]{1,5}$/.test(symbol);
 }
 
 function toIsoTime(timestamp) {
@@ -322,6 +332,46 @@ function buildStockQuoteFromChart(symbol, chartResult) {
   };
 }
 
+function buildStockQuoteFromNasdaq(symbol, data) {
+  const quoteData = data?.data;
+  const primary = quoteData?.primaryData;
+  if (!quoteData || !primary) {
+    throw new Error(data?.message || `No Nasdaq quote data for ${symbol}`);
+  }
+
+  const price = parseMarketNumber(primary.lastSalePrice);
+  const change = parseMarketNumber(primary.netChange);
+  const changePercent = parseMarketNumber(primary.percentageChange);
+  const previousClose = Number.isFinite(price) && Number.isFinite(change) ? price - change : null;
+
+  return {
+    symbol: quoteData.symbol || symbol,
+    shortName: quoteData.companyName || quoteData.symbol || symbol,
+    exchange: quoteData.exchange || null,
+    currency: "USD",
+    regularMarketPrice: price,
+    previousClose,
+    change,
+    changePercent,
+    changePercentText: primary.percentageChange || formatPercent(changePercent),
+    dayHigh: null,
+    dayLow: null,
+    volume: parseMarketNumber(primary.volume),
+    marketTime: primary.lastTradeTimestamp || null,
+    marketStatus: quoteData.marketStatus || null,
+    source: "Nasdaq quote",
+  };
+}
+
+async function getNasdaqStockQuote(normalizedSymbol) {
+  if (!isLikelyUsSymbol(normalizedSymbol)) {
+    throw new Error(`Nasdaq fallback only supports simple US symbols: ${normalizedSymbol}`);
+  }
+  const quoteUrl = `https://api.nasdaq.com/api/quote/${encodeURIComponent(normalizedSymbol)}/info?assetclass=stocks`;
+  const data = await fetchJsonWithTimeout(quoteUrl, DEFAULT_TIMEOUT_MS);
+  return buildStockQuoteFromNasdaq(normalizedSymbol, data);
+}
+
 async function getStockQuote({ symbol, market = "auto" }) {
   const normalizedSymbol = normalizeStockSymbol(symbol, market);
   const cacheKey = `stock:${normalizedSymbol}`;
@@ -331,9 +381,16 @@ async function getStockQuote({ symbol, market = "auto" }) {
     return cached.payload;
   }
 
-  const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(normalizedSymbol)}?range=5d&interval=1d`;
-  const chart = await fetchJsonWithTimeout(chartUrl, DEFAULT_TIMEOUT_MS);
-  const quote = buildStockQuoteFromChart(normalizedSymbol, chart);
+  let quote;
+  let primaryError = null;
+  try {
+    const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(normalizedSymbol)}?range=5d&interval=1d`;
+    const chart = await fetchJsonWithTimeout(chartUrl, DEFAULT_TIMEOUT_MS);
+    quote = buildStockQuoteFromChart(normalizedSymbol, chart);
+  } catch (error) {
+    primaryError = error;
+    quote = await getNasdaqStockQuote(normalizedSymbol);
+  }
   const spokenSummary = `${quote.shortName}，当前价格${formatPrice(quote.regularMarketPrice, quote.currency)}，较前收盘${quote.changePercentText || "暂无涨跌幅数据"}。公开行情仅供参考，不构成投资建议。`;
   const payload = {
     asOf: new Date().toISOString(),
@@ -341,6 +398,7 @@ async function getStockQuote({ symbol, market = "auto" }) {
     market,
     normalizedSymbol,
     quote,
+    fallbackReason: primaryError ? primaryError.message : null,
     spokenSummary,
     disclaimer: "Market data summary only. Not investment advice.",
   };
