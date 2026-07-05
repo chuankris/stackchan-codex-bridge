@@ -12,6 +12,9 @@ const DEFAULT_TIMEOUT_MS = Number(process.env.NEWS_FETCH_TIMEOUT_MS || 8000);
 const DEFAULT_MAX_ITEMS = Number(process.env.NEWS_MAX_ITEMS || 6);
 const CACHE_TTL_MS = Number(process.env.NEWS_CACHE_TTL_MS || 10 * 60 * 1000);
 const STOCK_CACHE_TTL_MS = Number(process.env.STOCK_CACHE_TTL_MS || 60 * 1000);
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY || "";
+const TAVILY_SEARCH_URL = process.env.TAVILY_SEARCH_URL || "https://api.tavily.com/search";
+const TAVILY_MAX_RESULTS = Number(process.env.TAVILY_MAX_RESULTS || 5);
 const DEFAULT_STOCK_SYMBOLS = (process.env.STOCK_DEFAULT_SYMBOLS || "AAPL,MSFT,NVDA,TSLA")
   .split(",")
   .map((item) => item.trim())
@@ -159,6 +162,29 @@ async function fetchJsonWithTimeout(url, timeoutMs) {
   return JSON.parse(await fetchWithTimeout(url, timeoutMs));
 }
 
+async function postJsonWithTimeout(url, body, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        ...headers,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function fetchSource(source) {
   const now = Date.now();
   const cached = cache.get(source.key);
@@ -248,6 +274,128 @@ async function getDailyBriefing({ market = "global", maxItems = DEFAULT_MAX_ITEM
     items,
     spokenBriefing: buildSpokenBriefing({ market, items, failedSources, maxItems: safeMaxItems }),
     disclaimer: "Public news summary only. Not investment advice.",
+  };
+}
+
+function normalizeSearchResults(results = []) {
+  return results.map((item) => ({
+    title: truncate(item.title || "", 160),
+    url: item.url || "",
+    content: truncate(item.content || item.snippet || "", 420),
+    score: Number.isFinite(item.score) ? item.score : undefined,
+    publishedDate: item.published_date || item.publishedDate || undefined,
+  }));
+}
+
+async function tavilySearch({
+  query,
+  topic = "general",
+  maxResults = TAVILY_MAX_RESULTS,
+  includeAnswer = false,
+  timeRange,
+  includeDomains,
+  excludeDomains,
+} = {}) {
+  const safeQuery = String(query || "").trim();
+  if (!safeQuery) throw new Error("query is required");
+  if (!TAVILY_API_KEY) {
+    return {
+      ok: false,
+      configured: false,
+      query: safeQuery,
+      results: [],
+      answer: "",
+      error: "TAVILY_API_KEY is not configured on the cloud MCP server.",
+    };
+  }
+
+  const safeMaxResults = Math.max(1, Math.min(Number(maxResults) || TAVILY_MAX_RESULTS, 10));
+  const body = {
+    query: safeQuery,
+    topic: topic === "news" ? "news" : "general",
+    search_depth: "basic",
+    max_results: safeMaxResults,
+    include_answer: includeAnswer,
+    include_raw_content: false,
+  };
+  if (timeRange) body.time_range = timeRange;
+  if (includeDomains?.length) body.include_domains = includeDomains.slice(0, 5);
+  if (excludeDomains?.length) body.exclude_domains = excludeDomains.slice(0, 8);
+
+  const response = await postJsonWithTimeout(
+    TAVILY_SEARCH_URL,
+    body,
+    { authorization: `Bearer ${TAVILY_API_KEY}` },
+    DEFAULT_TIMEOUT_MS,
+  );
+
+  return {
+    ok: true,
+    configured: true,
+    query: safeQuery,
+    answer: typeof response.answer === "string" ? response.answer : "",
+    results: normalizeSearchResults(response.results),
+    responseTime: response.response_time,
+    disclaimer: "Web search results may be incomplete or stale. Verify important facts with primary sources.",
+  };
+}
+
+function localStockAliasMatches(query) {
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  const matches = [];
+  for (const [name, symbol] of STOCK_ALIASES.entries()) {
+    if (name.includes(normalizedQuery) || normalizedQuery.includes(name)) {
+      matches.push({ name, symbol, source: "local-alias" });
+    }
+  }
+  return matches;
+}
+
+function inferSymbolCandidatesFromText(text) {
+  const candidates = new Set();
+  const patterns = [
+    /\b\d{6}\.(?:SS|SZ)\b/gi,
+    /\b\d{4,5}\.HK\b/gi,
+    /\b(?:SH|SZ)\d{6}\b/gi,
+    /\bHK\d{4,5}\b/gi,
+    /\b[A-Z]{1,5}\b/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of String(text || "").matchAll(pattern)) {
+      candidates.add(match[0].toUpperCase());
+    }
+  }
+  return [...candidates].slice(0, 12);
+}
+
+async function searchStockSymbol({ query, market = "auto", maxResults = 5 } = {}) {
+  const safeQuery = String(query || "").trim();
+  if (!safeQuery) throw new Error("query is required");
+  const localMatches = localStockAliasMatches(safeQuery);
+  const searchQuery = `${safeQuery} 股票 证券代码 A股 港股 美股`;
+  const search = await tavilySearch({
+    query: searchQuery,
+    topic: "general",
+    maxResults,
+    includeAnswer: "basic",
+    includeDomains: market === "cn" ? ["eastmoney.com", "qq.com", "sina.com.cn"] : undefined,
+  });
+  const candidates = new Set(localMatches.map((item) => item.symbol));
+  for (const result of search.results || []) {
+    for (const symbol of inferSymbolCandidatesFromText(`${result.title} ${result.content} ${result.url}`)) {
+      candidates.add(symbol);
+    }
+  }
+
+  return {
+    query: safeQuery,
+    market,
+    localMatches,
+    candidates: [...candidates].slice(0, 12),
+    search,
+    spokenSummary: localMatches.length
+      ? `${safeQuery} 可能对应 ${localMatches[0].symbol}。我也查了互联网结果，重要信息请再核对。`
+      : `我查到了 ${[...candidates].slice(0, 3).join("、") || "暂无明确候选代码"}。重要信息请再核对。`,
   };
 }
 
@@ -633,6 +781,46 @@ function createMcpServer() {
     async ({ symbols, market, maxItems }) => jsonContent(await getStockDailyBriefing({ symbols, market, maxItems })),
   );
 
+  server.registerTool(
+    "web_search",
+    {
+      title: "Web search",
+      description: "Search the web through Tavily for fresh public information. Requires TAVILY_API_KEY on the server.",
+      inputSchema: {
+        query: z.string().min(1).describe("Search query."),
+        topic: z.enum(["general", "news"]).optional().describe("Search topic."),
+        maxResults: z.number().int().min(1).max(10).optional(),
+        includeAnswer: z.union([z.boolean(), z.enum(["basic", "advanced"])]).optional(),
+        timeRange: z.enum(["day", "week", "month", "year"]).optional(),
+        includeDomains: z.array(z.string()).optional(),
+        excludeDomains: z.array(z.string()).optional(),
+      },
+    },
+    async ({ query, topic, maxResults, includeAnswer, timeRange, includeDomains, excludeDomains }) => jsonContent(await tavilySearch({
+      query,
+      topic,
+      maxResults,
+      includeAnswer,
+      timeRange,
+      includeDomains,
+      excludeDomains,
+    })),
+  );
+
+  server.registerTool(
+    "stock_symbol_search",
+    {
+      title: "Stock symbol search",
+      description: "Resolve a company name or alias to possible stock symbols using local aliases plus Tavily web search.",
+      inputSchema: {
+        query: z.string().min(1).describe("Company name or alias, e.g. 中国铝业, 中国宏桥, Nvidia."),
+        market: z.enum(["auto", "us", "hk", "cn"]).optional(),
+        maxResults: z.number().int().min(1).max(10).optional(),
+      },
+    },
+    async ({ query, market, maxResults }) => jsonContent(await searchStockSymbol({ query, market, maxResults })),
+  );
+
   return server;
 }
 
@@ -745,6 +933,26 @@ const httpServer = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/web-search" && req.method === "GET") {
+      sendJson(res, 200, await tavilySearch({
+        query: url.searchParams.get("query") || "",
+        topic: url.searchParams.get("topic") || "general",
+        maxResults: url.searchParams.get("maxResults") || TAVILY_MAX_RESULTS,
+        includeAnswer: url.searchParams.get("includeAnswer") === "true" ? "basic" : false,
+        timeRange: url.searchParams.get("timeRange") || undefined,
+      }));
+      return;
+    }
+
+    if (url.pathname === "/stock-symbol-search" && req.method === "GET") {
+      sendJson(res, 200, await searchStockSymbol({
+        query: url.searchParams.get("query") || "",
+        market: url.searchParams.get("market") || "auto",
+        maxResults: url.searchParams.get("maxResults") || 5,
+      }));
+      return;
+    }
+
     if (url.pathname === "/mcp") {
       await handleMcpRequest(req, res);
       return;
@@ -752,7 +960,7 @@ const httpServer = createServer(async (req, res) => {
 
     sendJson(res, 404, {
       error: "not_found",
-      endpoints: ["GET /healthz", "GET /sources", "GET /briefing", "GET /stock", "GET /stock-briefing", "POST/GET /mcp"],
+      endpoints: ["GET /healthz", "GET /sources", "GET /briefing", "GET /stock", "GET /stock-briefing", "GET /web-search", "GET /stock-symbol-search", "POST/GET /mcp"],
     });
   } catch (error) {
     sendJson(res, 500, { error: error.message });

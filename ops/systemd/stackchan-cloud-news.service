@@ -10,6 +10,7 @@ WorkingDirectory=/opt/stackchan-codex-bridge
 Environment=NODE_ENV=production
 Environment=HOST=127.0.0.1
 Environment=PORT=8788
+EnvironmentFile=-/etc/stackchan-cloud-news.env
 ExecStart=/usr/bin/npm run start:cloud-news
 Restart=always
 RestartSec=5

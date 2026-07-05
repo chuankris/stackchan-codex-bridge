@@ -108,6 +108,8 @@ Tools:
 - `news_list_sources`: list configured public RSS sources.
 - `stock_quote`: fetch a read-only public quote summary for one stock.
 - `stock_daily_briefing`: fetch public quotes and related news for a short Chinese spoken stock briefing.
+- `web_search`: search the web through Tavily when `TAVILY_API_KEY` is configured.
+- `stock_symbol_search`: resolve company names to likely stock symbols using local aliases plus Tavily search.
 
 Start it locally:
 
@@ -123,6 +125,8 @@ http://0.0.0.0:8788/healthz
 http://0.0.0.0:8788/briefing
 http://0.0.0.0:8788/stock?symbol=AAPL
 http://0.0.0.0:8788/stock-briefing?symbols=AAPL,NVDA,0700.HK,600519.SS
+http://0.0.0.0:8788/web-search?query=中国宏桥股票代码
+http://0.0.0.0:8788/stock-symbol-search?query=中国宏桥
 ```
 
 For Tencent Cloud, bind it to a stable port and place Nginx or a cloud load balancer with HTTPS in front:
@@ -140,7 +144,9 @@ NEWS_FETCH_TIMEOUT_MS=8000
 NEWS_CACHE_TTL_MS=600000
 NEWS_MAX_ITEMS=6
 STOCK_CACHE_TTL_MS=60000
-STOCK_DEFAULT_SYMBOLS=AAPL,MSFT,NVDA,TSLA,0700.HK,600519.SS
+STOCK_DEFAULT_SYMBOLS=AAPL,MSFT,NVDA,TSLA
+TAVILY_API_KEY=tvly-...
+TAVILY_MAX_RESULTS=5
 ```
 
 Add the public HTTPS MCP URL to the Xiaozhi MCP config, for example:
@@ -159,6 +165,8 @@ Add the public HTTPS MCP URL to the Xiaozhi MCP config, for example:
 This cloud service is intended for stable read-only abilities such as news, market data, weather, calendars, and reminders. Keep Mac-only abilities such as Codex control on the local bridge.
 
 Stock tools are read-only. They do not trade, do not manage portfolios, and should not be treated as investment advice.
+
+Tavily search is optional. If `TAVILY_API_KEY` is missing, search tools return a clear configuration error while local stock aliases continue to work.
 
 ## Run As Mac LaunchAgents
 

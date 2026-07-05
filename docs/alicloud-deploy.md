@@ -24,6 +24,8 @@ As of 2026-07-05:
   - `news_list_sources`
   - `stock_quote`
   - `stock_daily_briefing`
+  - `web_search`
+  - `stock_symbol_search`
 
 ## Deployment Notes
 
@@ -52,6 +54,16 @@ Dependencies were installed with script hooks disabled to avoid building unused 
 npm ci --ignore-scripts --registry=https://registry.npmmirror.com
 ```
 
+Optional Tavily search configuration lives outside git:
+
+```bash
+cat >/etc/stackchan-cloud-news.env <<'EOF'
+TAVILY_API_KEY=tvly-REPLACE_WITH_REAL_KEY
+TAVILY_MAX_RESULTS=5
+EOF
+systemctl restart stackchan-cloud-news stackchan-xiaozhi-client
+```
+
 The Python example MCP compile check is skipped on this server because the system Python is 3.6 and cannot parse `from __future__ import annotations`. The active Node services do not depend on the Python example.
 
 ## Health Checks
@@ -60,6 +72,7 @@ The Python example MCP compile check is skipped on this server because the syste
 systemctl is-active stackchan-cloud-news stackchan-xiaozhi-client stackchan-xiaozhi-watchdog.timer
 curl -s http://127.0.0.1:8788/healthz
 curl -s 'http://127.0.0.1:8788/stock?symbol=AAPL'
+curl -s 'http://127.0.0.1:8788/stock-symbol-search?query=中国宏桥'
 XIAOZHI_CONFIG_DIR=/opt/stackchan-codex-bridge \
   /root/.nvm/versions/node/v22.23.1/bin/node \
   /opt/stackchan-codex-bridge/node_modules/xiaozhi-client/dist/cli/index.js mcp list --tools
