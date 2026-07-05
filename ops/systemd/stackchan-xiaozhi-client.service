@@ -1,0 +1,17 @@
+[Unit]
+Description=StackChan Xiaozhi Client
+After=network-online.target stackchan-cloud-news.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/stackchan-codex-bridge
+Environment=NODE_ENV=production
+Environment=XIAOZHI_CONFIG_DIR=/opt/stackchan-codex-bridge
+ExecStart=/usr/bin/node /opt/stackchan-codex-bridge/node_modules/xiaozhi-client/dist/cli/index.js start --debug
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
