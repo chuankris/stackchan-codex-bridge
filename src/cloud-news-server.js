@@ -368,7 +368,24 @@ async function getNasdaqStockQuote(normalizedSymbol) {
     throw new Error(`Nasdaq fallback only supports simple US symbols: ${normalizedSymbol}`);
   }
   const quoteUrl = `https://api.nasdaq.com/api/quote/${encodeURIComponent(normalizedSymbol)}/info?assetclass=stocks`;
-  const data = await fetchJsonWithTimeout(quoteUrl, DEFAULT_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  let data;
+  try {
+    const response = await fetch(quoteUrl, {
+      signal: controller.signal,
+      headers: {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+        accept: "application/json,text/plain,*/*",
+        origin: "https://www.nasdaq.com",
+        referer: `https://www.nasdaq.com/market-activity/stocks/${encodeURIComponent(normalizedSymbol.toLowerCase())}`,
+      },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    data = await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
   return buildStockQuoteFromNasdaq(normalizedSymbol, data);
 }
 
